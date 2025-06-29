@@ -114,8 +114,7 @@ impl Scanner {
             },
             '~' => {
                 self.add_token(TokenType::BITWISE_NOT, None);
-            },
-            ':' => self.add_token(TokenType::COLON, None),
+            }
             '!' => {
                 if self.match_token('=') {
                     self.add_token(TokenType::BANG_EQUAL, None);
