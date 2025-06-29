@@ -109,6 +109,9 @@ impl Scanner {
             ';' => {
                 self.add_token(TokenType::SEMICOLON, None);
             },
+            ':' => { 
+                self.add_token(TokenType::COLON, None);
+            }
             '*' => {
                 self.add_token(TokenType::STAR, None);
             },
