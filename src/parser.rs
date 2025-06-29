@@ -1,10 +1,9 @@
 // This file contains the Parser implementation that was extracted from interpreter.rs
 
+use std::rc::Rc;
+use serde_json::de::Read;
 use crate::token::{Token, TokenType, Literal};
-use crate::ast::{
-    Statement, VariableDeclarationStatement, ExpressionStatement,
-    BinaryExpression, LiteralExpression, ParenthesizedExpression, UnaryExpression, VariableExpression
-};
+use crate::ast::{Statement, VariableDeclarationStatement, ExpressionStatement, BinaryExpression, LiteralExpression, ParenthesizedExpression, UnaryExpression, IdentifierExpression, CallExpression, BlockStatement, ObjectLiteralExpression, AssignmentExpression, PropertyDefinition, PropertyName};
 
 pub struct Parser {
     tokens: Vec<Token>,
@@ -17,16 +16,54 @@ impl Parser {
     }
 
     pub fn expression(&mut self) -> ExpressionStatement {
-        return self.equality();
+        return self.assignment_expression();
+    }
+
+    fn assignment_expression(&mut self) -> ExpressionStatement {
+        let expression = self.equality();
+
+        if self.match_token(vec![TokenType::EQUAL]) {
+            let equals = &self.previous();
+
+            match expression {
+                ExpressionStatement::IdentifierExpression(var_expr) => {
+                    return ExpressionStatement::AssignmentExpression(Box::new(AssignmentExpression {
+                        left_hand_side_expression: Rc::new(ExpressionStatement::IdentifierExpression(Box::new(*var_expr))),
+                        expression: Rc::new(self.assignment_expression())
+                    }))
+                },
+                _ => {
+                    println!("{:?}: Invalid assignment target.", equals);
+                }
+            }
+        }
+
+        return expression;
     }
 
     pub fn statement(&mut self) -> Statement {
-        // Add support for statements here...
-
         // https://tc39.es/ecma262/#sec-asi-interesting-cases-in-statement-lists
         // TODO: Handle automatic semi colon insertion, see spec:
-
+        if self.peek().token_type == TokenType::SEMICOLON {
+            self.advance();
+        } else if self.match_token(vec![TokenType::LEFT_BRACE]) {
+            return self.block_statement();
+        }
         return self.expression_statement()
+    }
+
+    pub fn block_statement(&mut self) -> Statement {
+        let mut statements: Vec<Statement> = Vec::new();
+        while !self.check(TokenType::RIGHT_BRACE) && !self.is_at_end() {
+            statements.push(self.declaration());
+        }
+
+        if self.peek().token_type == TokenType::SEMICOLON {
+            self.advance();
+        }
+
+        self.consume(TokenType::RIGHT_BRACE, "Expect '}' after block.".to_string());
+        return Statement::BlockStatement(Box::new(BlockStatement { statements }))
     }
 
     pub fn declaration(&mut self) -> Statement {
@@ -42,14 +79,20 @@ impl Parser {
 
     fn var_declaration(&mut self) -> Statement {
         let name = self.consume(TokenType::IDENTIFIER, "missing variable name".to_string()).clone();
-        let mut initializer: Option<Box<ExpressionStatement>> = None;
+        let mut initializer: Option<Box<AssignmentExpression>> = None;
 
         if self.match_token(vec![TokenType::EQUAL]) {
-            initializer = Option::Some(Box::new(self.expression()));
-            return Statement::VariableStatement(Box::new(VariableDeclarationStatement { binding_identifier: name, initializer: initializer }))
+            initializer = Some(Box::new(AssignmentExpression {
+                left_hand_side_expression: Rc::new(ExpressionStatement::IdentifierExpression(Box::new(IdentifierExpression { binding_identifier: name.clone() }))),
+                expression: Rc::new(self.expression()),
+            }));
+
+            return Statement::VariableStatement(Box::new(VariableDeclarationStatement {
+                binding_identifier: name,
+                initializer }))
         }
 
-        return Statement::VariableStatement(Box::new(VariableDeclarationStatement { binding_identifier: name, initializer: initializer }))
+        return Statement::VariableStatement(Box::new(VariableDeclarationStatement { binding_identifier: name, initializer }))
     }
 
 
@@ -112,7 +155,36 @@ impl Parser {
             return ExpressionStatement::UnaryExpression(Box::new(UnaryExpression { operator, right: Box::new(right) }))
         }
 
-        return self.primary()
+        return self.call_expression()
+    }
+
+    fn call_expression(&mut self) -> ExpressionStatement {
+        let mut expression: ExpressionStatement = self.primary();
+        loop {
+            if self.match_token(vec![TokenType::LeftParen]) {
+                expression = self.finish_call(expression);
+            } else {
+                break;
+            }
+        }
+
+        return expression;
+    }
+
+    fn finish_call(&mut self, callee: ExpressionStatement) -> ExpressionStatement {
+        let mut arguments: Vec<ExpressionStatement> = Vec::new();
+            arguments.push(self.expression());
+
+            while self.match_token(vec![TokenType::COMMA]) {
+                arguments.push(self.expression());
+                if self.check(TokenType::RIGHT_PAREN) {
+                    break;
+                }
+            }
+
+        let paren = self.consume(TokenType::RIGHT_PAREN, "Expect ')' after arguments.".to_string());
+
+        return ExpressionStatement::CallExpression(Box::new(CallExpression { callee: Box::new(callee), paren: paren.clone(), arguments }))
     }
 
     fn primary(&mut self) -> ExpressionStatement {
@@ -135,7 +207,32 @@ impl Parser {
 
         // https://tc39.es/ecma262/#prod-VariableDeclaration
         if self.match_token(vec![TokenType::IDENTIFIER]) {
-            return ExpressionStatement::VariableExpression(Box::new(VariableExpression { binding_identifier: self.previous().clone() }))
+            return ExpressionStatement::IdentifierExpression(Box::new(IdentifierExpression { binding_identifier: self.previous().clone() }))
+        }
+
+        if self.match_token(vec![TokenType::LEFT_BRACE]) {
+            // https://tc39.es/ecma262/#sec-static-semantics-propertynamelist
+            let mut property_name_list: Vec<PropertyDefinition> = Vec::new();
+
+            match self.create_property_definition() {
+                Some(property_name) => {
+                    property_name_list.push(property_name);
+
+                    while self.match_token(vec![TokenType::COMMA]) {
+                        property_name_list.push(self.create_property_definition().unwrap());
+                        if self.check(TokenType::RIGHT_BRACE) {
+                            break;
+                        }
+                    }
+                    self.consume(TokenType::RIGHT_BRACE, "Expect '}' after expression.".to_string());
+
+                },
+                None => {
+                    self.consume(TokenType::RIGHT_BRACE, "Expect '}' after expression.".to_string());
+                }
+            }
+
+            return ExpressionStatement::ObjectLiteralExpression(Box::new(ObjectLiteralExpression { property_definitions: property_name_list }))
         }
 
         if self.match_token(vec![TokenType::LeftParen]) {
@@ -146,6 +243,43 @@ impl Parser {
 
         // Default case - maybe should return an option
         ExpressionStatement::LiteralExpression(Box::new(LiteralExpression { value: Literal::Null() }))
+    }
+
+
+    // https://tc39.es/ecma262/#sec-static-semantics-propertynamelist
+    fn create_property_definition(&mut self) -> Option<PropertyDefinition> {
+        if self.match_token(vec![TokenType::IDENTIFIER, TokenType::NUMBER, TokenType::STRING]) {
+            // 1. Let propName be the PropName of PropertyDefinition.
+
+            // TODO: Implement proper getting of PropName https://tc39.es/ecma262/#sec-static-semantics-propname
+            let prop_name = self.previous().clone();
+
+            self.consume(TokenType::COLON, "Uncaught SyntaxError: missing : after property id".to_string());
+
+            if prop_name.token_type == TokenType::IDENTIFIER {
+                let expression = self.expression();
+
+                // 3. Return « propName ».
+                return Some(PropertyDefinition { property_name: PropertyName::IdentifierName(prop_name.clone()),
+                    assignment_expression: AssignmentExpression { left_hand_side_expression: Rc::new(ExpressionStatement::IdentifierExpression(Box::new(IdentifierExpression { binding_identifier: prop_name }))), expression: Rc::new(expression) }});
+            } else {
+                match prop_name.literal {
+                    Some(Literal::String(ref value)) => {
+                        let expression = self.expression();
+                        // 3. Return « propName ».
+                        return Some(PropertyDefinition { property_name:  PropertyName::LiteralPropertyName(Literal::String(value.clone())),
+                            assignment_expression: AssignmentExpression { left_hand_side_expression: Rc::new(ExpressionStatement::IdentifierExpression(Box::new(IdentifierExpression { binding_identifier: prop_name }))), expression: Rc::new(expression) }});
+
+                    },
+                    _ => { unimplemented!() }
+                }
+            }
+
+            // https://tc39.es/ecma262/#sec-object-initializer-static-semantics-early-errors
+        }
+
+        // 2. If propName is empty, return a new empty List.
+        return None;
     }
 
     fn consume(&mut self, token_type: TokenType, message: String) -> &Token {
