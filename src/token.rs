@@ -5,7 +5,7 @@ pub enum TokenType {
     // Single-character tokens.
     LeftParen, RIGHT_PAREN, LEFT_BRACE, RIGHT_BRACE,
     COMMA, DOT, MINUS, PLUS, SEMICOLON, SLASH, STAR,
-    BITWISE_NOT,
+    BITWISE_NOT, COLON,
 
     // One or two character tokens.
     BANG, BANG_EQUAL,
@@ -39,6 +39,7 @@ pub enum Literal {
 }
 
 #[derive(Clone)]
+#[derive(Debug)]
 pub struct Token {
     pub token_type: TokenType,
     pub lexeme: String,
