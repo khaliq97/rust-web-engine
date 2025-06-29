@@ -18,22 +18,19 @@ fn main() {
 
     let args: Vec<String> = env::args().collect();
 
-    for arg in args.iter() {
         if args.len() == 2 {
-            if arg == "js" {
+            if args[1] == "js" {
                 let mut interpreter = Interpreter::new();
                 interpreter.run_prompt();
             } else {
-                source_html_file_path = arg.to_string();
+                source_html_file_path = args[1].to_string();
                 let mut tokenizer = tokenizer::Tokenizer::new(String::from(source_html_file_path));
                 tokenizer.start();
             }
         } else if args.len() == 3 {
-            if arg == "js" {
+            if args[1] == "js" {
                 let mut interpreter = Interpreter::new();
                 interpreter.run_file(args[2].to_string());
             }
         }
-
-    }
 }
