@@ -878,7 +878,7 @@ struct GlobalEnvironmentRecord {
     declarative_environment_record: RefCell<DeclarativeEnvironmentRecord>
 }
 
-macro_rules! try_completion {
+macro_rules! completion {
     ($expr:expr) => {
         match $expr.type_ {
             CompletionRecordType::Normal => {
@@ -899,16 +899,16 @@ impl AstVisitor<CompletionRecord> for Interpreter {
     // https://tc39.es/ecma262/#sec-evaluatestringornumericbinaryexpression
     fn visit_binary(&mut self, expression: &BinaryExpression) -> CompletionRecord {
         // 1. Let lRef be ? Evaluation of leftOperand.
-        let left_expression = self.evaluate(&*expression.left);
+        let left_expression = completion!(self.evaluate(&*expression.left));
 
         // 2. Let lVal be ? GetValue(lRef).
-        let left_value =  try_completion!(Interpreter::get_value(left_expression.value.clone()));
+        let left_value =  completion!(Interpreter::get_value(left_expression.value.clone()));
 
         // 3. Let rRef be ? Evaluation of rightOperand.
-        let right_expression = self.evaluate(&*expression.right);
+        let right_expression = completion!(self.evaluate(&*expression.right));
 
         // 4. Let rVal be ? GetValue(rRef).
-        let right_value = try_completion!(Interpreter::get_value(right_expression.value.clone()));
+        let right_value = completion!(Interpreter::get_value(right_expression.value.clone()));
 
         match (&*left_value.value, &*right_value.value) {
             (ReferenceRecordOrJsValue::JSValue(l_value), ReferenceRecordOrJsValue::JSValue(r_value)) => {
@@ -1554,7 +1554,7 @@ impl Interpreter {
         let mut reader = BufReader::new(file);
         let mut source = String::new();
         reader.read_to_string(&mut source).expect("File could not be read!");
-        self.run(source);
+        self.run(source, ExecutionMode::Script);
 
         if self.had_error {
             std::process::exit(65);
@@ -1567,12 +1567,12 @@ impl Interpreter {
             std::io::stdout().flush().unwrap();
             let mut line = String::new();
             std::io::stdin().read_line(&mut line).expect("Failed to read line");
-            self.run(line);
+            self.run(line, ExecutionMode::Shell);
             self.had_error = false;
         }
     }
 
-    fn run(&mut self, source: String) {
+    fn run(&mut self, source: String, execution_mode: ExecutionMode) {
         let mut scanner = Scanner::new(source);
         let tokens = scanner.scan_tokens().clone();
 
@@ -1582,7 +1582,7 @@ impl Interpreter {
 
         let mut parser = Parser::new(tokens);
         let statements = parser.parse();
-        self.interpret(statements);
+        self.interpret(statements, execution_mode);
     }
 
     fn error(line: usize, message: String) {
@@ -1604,13 +1604,27 @@ impl Interpreter {
         expression_statement.accept(self)
     }
 
-    fn interpret(&mut self, statements: Vec<Statement>)  {
+    fn interpret(&mut self, statements: Vec<Statement>, execution_mode: ExecutionMode)  {
         for statement in statements.iter() {
             let result = self.execute(statement);
-            let mut pretty_printer = ASTPrettyPrinter;
-            let expression_ast = statement.accept(&mut pretty_printer);
-            println!("Parsed expression {}", expression_ast);
-            println!("{:?}", result);
+            match result.type_ {
+                CompletionRecordType::Normal => {
+                    let mut pretty_printer = ASTPrettyPrinter;
+                    let expression_ast = statement.accept(&mut pretty_printer);
+                    println!("Parsed expression {}", expression_ast);
+                    println!("{:?}", result);
+                },
+                CompletionRecordType::Throw => {
+                    println!("Uncaught {:?}", result.value);
+                    match execution_mode {
+                        ExecutionMode::Script => {
+                            exit(1);
+                        }
+                        ExecutionMode::Shell => {},
+                    }
+                },
+                _ => { unimplemented!() }
+            }
         }
     }
 
@@ -2005,4 +2019,9 @@ impl Interpreter {
         }
     }
 
+}
+
+enum ExecutionMode {
+    Shell,
+    Script
 }
