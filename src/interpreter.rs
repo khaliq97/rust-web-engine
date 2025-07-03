@@ -33,6 +33,18 @@ struct JSSymbol {
     description: String,
 }
 
+macro_rules! completion {
+    ($expr:expr) => {
+        match $expr.type_ {
+            CompletionRecordType::Normal => {
+                $expr
+            },
+            CompletionRecordType::Throw => return $expr,
+            _ => unimplemented!()
+        }
+    };
+}
+
 impl JSSymbol {
     pub fn new(description: String) -> JSSymbol {
         JSSymbol { description: description }
@@ -91,116 +103,32 @@ impl JSObject {
         JSObject { values: HashMap::new(), prototype: None, extensible: false }
     }
 
-/*    fn value(&self, key: PropertyKey) -> Option<&DataProperty> {
-        match key {
-            PropertyKey::String(key) => {
-                return self.values.get(&PropertyKey::String(key));
-            },
-            PropertyKey::Symbol(key) => {
-                return self.values.get(&PropertyKey::Symbol(key));
-            }
-        }
-    }*/
-
     // https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots-get-p-receiver
-    // TODO: Return a normal completion instead of a raw JSValue
-    pub fn get(&self, key: &PropertyKey, receiver: &Rc<RefCell<JSObject>>) -> Rc<RefCell<JSValue>> {
-        return self.ordinary_get(key, receiver);
+    pub fn get(&self, key: &PropertyKey, receiver: &Rc<RefCell<JSObject>>) -> CompletionRecord {
+        // 1. Return ? OrdinaryGet(O, P, Receiver).
+        return completion!(self.ordinary_get(key, receiver));
     }
 
     // https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots-set-p-v-receiver
-    // TODO: reciever should be of type Ecmascript Language Value (JSValue)
+    // TODO: receiver should be of type Ecmascript Language Value (JSValue)
     pub fn set(&mut self, key: Rc<PropertyKey>, value: Rc<RefCell<JSValue>>, receiver: &Rc<RefCell<JSObject>>) -> CompletionRecord {
         // 1. Return ? OrdinarySet(O, P, V, Receiver).
-        return self.ordinary_set(key, value, receiver);
+        return completion!(self.ordinary_set(key.clone(), value.clone(), receiver));
     }
 
     // https://tc39.es/ecma262/#sec-ordinaryset
     fn ordinary_set(&mut self, property_key: Rc<PropertyKey>, value: Rc<RefCell<JSValue>>, receiver: &Rc<RefCell<JSObject>>) -> CompletionRecord {
         // 1. Let ownDesc be ? O.[[GetOwnProperty]](P).
-        let own_descriptor = self.get_own_property(&*property_key);
+        let own_descriptor = completion!(self.get_own_property(&*property_key));
 
         // 2. Return ? OrdinarySetWithOwnDescriptor(O, P, V, Receiver, ownDesc).
         match &*own_descriptor.value {
             ReferenceRecordOrJsValue::PropertyDescriptor(property_descriptor) => {
-                return self.ordinary_set_with_own_descriptor(property_key, value, receiver, property_descriptor)
+                return completion!(self.ordinary_set_with_own_descriptor(property_key.clone(), value.clone(), receiver, property_descriptor))
             },
             _ => {
                 unimplemented!();
             }
-        }
-    }
-
-    fn handle_data_property_set(
-        &mut self,
-        property_key: &PropertyKey,
-        value: Rc<RefCell<JSValue>>,
-        property_descriptor: PropertyDescriptor,
-    ) -> CompletionRecord {
-        match &property_descriptor.property {
-            // 2. If IsDataDescriptor(ownDesc) is true, then
-            Some(PropertyType::DataProperty(data_property)) => {
-                // a. If ownDesc.[[Writable]] is false, return false.
-                if !data_property.writable {
-                    return create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::new(RefCell::new(JSValue::Boolean(false))))));
-                }
-
-                // b. If Receiver is not an Object, return false.
-                // TODO: receiver param is always an JSObject, but should be of type Ecmascript Language Value (JSValue)
-
-                // c. Let existingDescriptor be ? Receiver.[[GetOwnProperty]](P).
-                let existing_descriptor = self.get_own_property(&*property_key);
-
-                match &*existing_descriptor.value {
-                    ReferenceRecordOrJsValue::PropertyDescriptor(property_descriptor_type) => {
-                        match property_descriptor_type {
-                            // d. If existingDescriptor is not undefined, then
-                            PropertyDescriptorType::PropertyDescriptor(property_descriptor) => {
-                                match &property_descriptor.property {
-                                    Some(PropertyType::AccessorProperty(_)) => {
-                                        // i. If IsAccessorDescriptor(existingDescriptor) is true, return false.
-                                        return create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::new(RefCell::new(JSValue::Boolean(false))))));
-                                    },
-                                    Some(PropertyType::DataProperty(data_property)) => {
-                                        // ii. If existingDescriptor.[[Writable]] is false, return false.
-                                        if !data_property.writable {
-                                            return create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::new(RefCell::new(JSValue::Boolean(false))))));
-                                        }
-                                        //               iii. Let valueDesc be the PropertyDescriptor { [[Value]]: V }.
-                                        // TODO Need to find a way to make the fields writable,enumerable etc configurable and not just initialize them anyway
-                                        let value_desc = PropertyDescriptor { property: Some(PropertyType::DataProperty(DataProperty { value: Rc::clone(&value), writable: true, enumerable: data_property.enumerable, configurable: data_property.configurable })) };
-                                        //               iv. Return ? Receiver.[[DefineOwnProperty]](P, valueDesc).
-
-                                        // TODO: We need to call DefineOwnProperty on the receiver as otherwise it will set the field on the parent object,
-                                        // currently we have issues with the borrow checker so using self for now.
-                                        // This will be required when we fully support the prototype chain
-                                        return self.define_own_property(&*property_key, value_desc);
-                                    },
-
-                                    _ => {
-                                        unimplemented!();
-                                    }
-                                }
-                            },
-                            // e. Else,
-                            PropertyDescriptorType::Undefined(_) => {
-                                // i. Assert: Receiver does not currently have a property P.
-                                // ii. Return ? CreateDataProperty(Receiver, P, V). TODO Implement CreateDataProperty
-                                let value_desc = PropertyDescriptor { property: Some(PropertyType::DataProperty(DataProperty { value: Rc::clone(&value), writable: true, enumerable: data_property.enumerable, configurable: data_property.configurable })) };
-                                // iv. Return ? Receiver.[[DefineOwnProperty]](P, valueDesc).
-
-                                // TODO: We need to call DefineOwnProperty on the receiver as otherwise it will set the field on the parent object,
-                                // currently we have issues with the borrow checker so using self for now.
-                                // This will be required when we fully support the prototype chain
-                                return self.define_own_property(&*property_key, value_desc);
-                            }
-                        }
-                    },
-
-                    _ => { unimplemented!() }
-                }
-            },
-            _ => { unimplemented!() }
         }
     }
 
@@ -215,8 +143,7 @@ impl JSObject {
                 // c. Else,
                 //   i. Set ownDesc to the PropertyDescriptor { [[Value]]: undefined, [[Writable]]: true, [[Enumerable]]: true, [[Configurable]]: true }.
                 let own_desc = PropertyDescriptorType::PropertyDescriptor(PropertyDescriptor { property: Some(PropertyType::DataProperty(DataProperty { value: Rc::new(RefCell::new(JSValue::Undefined)), writable: true, enumerable: true, configurable: true })) });
-                return self.define_own_property(&*property_key, PropertyDescriptor { property: Some(PropertyType::DataProperty(DataProperty { value: Rc::clone(&value), writable: true, enumerable: true, configurable: true })) });
-
+                return completion!(self.define_own_property(&*property_key, &PropertyDescriptor { property: Some(PropertyType::DataProperty(DataProperty { value: Rc::clone(&value), writable: true, enumerable: true, configurable: true })) }));
             },
             PropertyDescriptorType::PropertyDescriptor(property_descriptor) => {
                 match &property_descriptor.property {
@@ -231,7 +158,7 @@ impl JSObject {
                         // TODO: receiver param is always an JSObject, but should be of type Ecmascript Language Value (JSValue)
 
                         // c. Let existingDescriptor be ? Receiver.[[GetOwnProperty]](P).
-                        let existing_descriptor = self.get_own_property(&*property_key);
+                        let existing_descriptor = completion!(self.get_own_property(&*property_key));
 
                         match &*existing_descriptor.value {
                             ReferenceRecordOrJsValue::PropertyDescriptor(property_descriptor_type) => {
@@ -256,7 +183,7 @@ impl JSObject {
                                                 // TODO: We need to call DefineOwnProperty on the receiver as otherwise it will set the field on the parent object,
                                                 // currently we have issues with the borrow checker so using self for now.
                                                 // This will be required when we fully support the prototype chain
-                                                return self.define_own_property(&*property_key, value_desc);
+                                                return completion!(self.define_own_property(&*property_key, &value_desc));
                                             },
 
                                             _ => {
@@ -273,7 +200,7 @@ impl JSObject {
                                         // TODO: We need to call DefineOwnProperty on the receiver as otherwise it will set the field on the parent object,
                                         // currently we have issues with the borrow checker so using self for now.
                                         // This will be required when we fully support the prototype chain
-                                        return self.define_own_property(&*property_key, value_desc);
+                                        return completion!(self.define_own_property(&*property_key, &value_desc));
                                     }
                                 }
                             },
@@ -295,15 +222,15 @@ impl JSObject {
     }
 
     // https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots-defineownproperty-p-desc
-    fn define_own_property(&mut self, property_key: &PropertyKey, property_descriptor: PropertyDescriptor) -> CompletionRecord {
-        return self.ordinary_define_own_property(property_key, property_descriptor);
+    fn define_own_property(&mut self, property_key: &PropertyKey, property_descriptor: &PropertyDescriptor) -> CompletionRecord {
+        //1. Return ? OrdinaryDefineOwnProperty(O, P, Desc).
+        return completion!(self.ordinary_define_own_property(property_key, property_descriptor));
     }
 
     // https://tc39.es/ecma262/#sec-ordinarydefineownproperty
-    fn ordinary_define_own_property(&mut self, property_key: &PropertyKey, property_descriptor: PropertyDescriptor) -> CompletionRecord  {
+    fn ordinary_define_own_property(&mut self, property_key: &PropertyKey, property_descriptor: &PropertyDescriptor) -> CompletionRecord  {
         // Let current be ? O.[[GetOwnProperty]](P).
-        let current = self.get_own_property(property_key);
-        println!("CURRENT {:?}", current);
+        let current = completion!(self.get_own_property(property_key));
         // 2. Let extensible be ? IsExtensible(O). TODO
 
         // 3. Return ValidateAndApplyPropertyDescriptor(O, P, extensible, Desc, current).
@@ -317,7 +244,7 @@ impl JSObject {
     }
 
     // https://tc39.es/ecma262/#sec-validateandapplypropertydescriptor
-    fn validate_and_apply_property_descriptor(&mut self, property_key: &PropertyKey, extensible: bool, property_descriptor: PropertyDescriptor, current: &PropertyDescriptorType) -> bool {
+    fn validate_and_apply_property_descriptor(&mut self, property_key: &PropertyKey, extensible: bool, property_descriptor: &PropertyDescriptor, current: &PropertyDescriptorType) -> bool {
         // Assert: P is a property key.
         // 2. If current is undefined, then
         match current {
@@ -328,7 +255,7 @@ impl JSObject {
                 }
                 //        b. If O is undefined, return true. TODO
                 //        c. If IsAccessorDescriptor(Desc) is true, then
-                match property_descriptor.property {
+                match &property_descriptor.property {
                     Some(PropertyType::AccessorProperty(data_property)) => {
                         //               i. Create an own accessor property named P of object O whose [[Get]], [[Set]], [[Enumerable]], and [[Configurable]] attributes
                         //                  are set to the value of the corresponding field in Desc if Desc has that field, or to the attribute's default value otherwise.
@@ -338,7 +265,7 @@ impl JSObject {
                     Some(PropertyType::DataProperty(data_prop)) => {
                         // i. Create an own data property named P of object O whose [[Value]], [[Writable]], [[Enumerable]], and [[Configurable]] attributes
                         // are set to the value of the corresponding field in Desc if Desc has that field, or to the attribute's default value otherwise.
-                        let new_data_property = DataProperty { value: data_prop.value, writable: data_prop.writable, configurable: data_prop.configurable, enumerable: data_prop.enumerable };
+                        let new_data_property = DataProperty { value: data_prop.value.clone(), writable: data_prop.writable, configurable: data_prop.configurable, enumerable: data_prop.enumerable };
 
                         match property_key {
                             PropertyKey::String(s) => {
@@ -405,46 +332,51 @@ impl JSObject {
     }
 
     // https://tc39.es/ecma262/#sec-ordinaryget
-    fn ordinary_get(&self, key: &PropertyKey, receiver: &Rc<RefCell<JSObject>>) -> Rc<RefCell<JSValue>> {
+    fn ordinary_get(&self, key: &PropertyKey, receiver: &Rc<RefCell<JSObject>>) -> CompletionRecord {
         // 1. Let desc be ? O.[[GetOwnProperty]](P).
         // https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots-getownproperty-p
-        let desc = self.ordinary_get_own_property(key);
-        match desc {
-            //     2. If desc is undefined, then
-            PropertyDescriptorType::Undefined(_) => {
-                // TODO: a. Let parent be ? O.[[GetPrototypeOf]](). We need to implement prototypes
-                // let parent = &self;
-                // TODO:    b. If parent is null, return undefined.
+        let desc = completion!(self.get_own_property(key));
+        match desc.value.deref() {
+            ReferenceRecordOrJsValue::PropertyDescriptor(property_descriptor) => {
+                match property_descriptor {
+                    //     2. If desc is undefined, then
+                    PropertyDescriptorType::Undefined(_) => {
+                        //      a. Let parent be ? O.[[GetPrototypeOf]](). We need to implement prototypes TODO
+                        //     b. If parent is null, return undefined.
+                        return create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::new(RefCell::new(JSValue::Undefined)))));
 
-                //     c. Return ? parent.[[Get]](P, Receiver).
-                return self.get(key, receiver);
-            },
-            PropertyDescriptorType::PropertyDescriptor(property_descriptor) => {
-                match property_descriptor.property {
-                    //     3. If IsDataDescriptor(desc) is true, return desc.[[Value]].
-                    Some(PropertyType::DataProperty(data_property)) => {
-                        return Rc::clone(&data_property.value);
+                        //     c. Return ? parent.[[Get]](P, Receiver). TODO
                     },
-                    //     4. Assert: IsAccessorDescriptor(desc) is true.
-                    Some(PropertyType::AccessorProperty(accessor_property)) => {
-                        //     5. Let getter be desc.[[Get]].
-                        let getter = accessor_property.get;
-                        //     6. If getter is undefined, return undefined.
-                        if getter.is_none() {
-                            return Rc::new(RefCell::new(JSValue::Undefined));
-                        } else {
-                            //     7. Return ? Call(getter, Receiver).
-                            todo!();
+                    PropertyDescriptorType::PropertyDescriptor(property_descriptor) => {
+                        match &property_descriptor.property {
+                            //     3. If IsDataDescriptor(desc) is true, return desc.[[Value]].
+                            Some(PropertyType::DataProperty(data_property)) => {
+                                return create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::clone(&data_property.value))));
+                            },
+                            //     4. Assert: IsAccessorDescriptor(desc) is true.
+                            Some(PropertyType::AccessorProperty(accessor_property)) => {
+                                //     5. Let getter be desc.[[Get]].
+                                let getter = accessor_property.get;
+                                //     6. If getter is undefined, return undefined.
+                                if getter.is_none() {
+                                    return create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::new(RefCell::new(JSValue::Undefined)))));
+                                } else {
+                                    //     7. Return ? Call(getter, Receiver).
+                                    todo!();
+                                }
+                            },
+                            None => unimplemented!()
                         }
-                    },
-                    None => unimplemented!()
+                    }
                 }
-            }
+            },
+            _ => { unreachable!() }
         }
     }
 
     // https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots-getownproperty-p
     fn get_own_property(&self, key: &PropertyKey) -> CompletionRecord {
+        //1. Return OrdinaryGetOwnProperty(O, P).
         return create_normal_completion(Rc::new(ReferenceRecordOrJsValue::PropertyDescriptor(self.ordinary_get_own_property(key))));
     }
 
@@ -485,13 +417,14 @@ impl JSObject {
 
     // https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots-hasproperty-p
     fn has_property(&self, property_key: PropertyKey) -> CompletionRecord {
+        //1. Return ? OrdinaryHasProperty(O, P).
         return self.ordinary_has_property(property_key);
     }
 
     // https://tc39.es/ecma262/#sec-ordinaryhasproperty
     fn ordinary_has_property(&self, property_key: PropertyKey) -> CompletionRecord {
         // 1. Let hasOwn be ? O.[[GetOwnProperty]](P).
-        let has_own = self.get_own_property(&property_key);
+        let has_own = completion!(self.get_own_property(&property_key));
         // 2. If hasOwn is not undefined, return true.
         match has_own.value.deref() {
             ReferenceRecordOrJsValue::PropertyDescriptor(property_descriptor) => {
@@ -724,17 +657,28 @@ impl ObjectEnvironmentRecord {
 
         //     2. Let value be ? HasProperty(bindingObject, N).
         //      https://tc39.es/ecma262/#sec-hasproperty
-        let value = bindingObject.borrow().values.contains_key(&PropertyKey::String(binding_id.clone()));
+        let value = completion!(bindingObject.borrow().has_property(PropertyKey::String(binding_id.clone())));
 
-        //     3. If value is false, then
-        if !value {
-            todo!()
-            // a. If S is false, return undefined; otherwise throw a ReferenceError exception.
-        } else {
-            //     4. Return ? Get(bindingObject, N).
-            // https://tc39.es/ecma262/#sec-get-o-p
-            return CompletionRecord { type_: CompletionRecordType::Normal, value: Rc::new(ReferenceRecordOrJsValue::JSValue(bindingObject.borrow().get(&*Rc::new(PropertyKey::String(binding_id)), bindingObject))), target: None }
+        match &*value.value {
+            ReferenceRecordOrJsValue::JSValue(ref value) => {
+                match &*value.borrow() {
+                    JSValue::Boolean(bool_value) => {
+                        //     3. If value is false, then
+                        if !bool_value {
+                            todo!()
+                            // a. If S is false, return undefined; otherwise throw a ReferenceError exception.
+                        } else {
+                            //     4. Return ? Get(bindingObject, N).
+                            // https://tc39.es/ecma262/#sec-get-o-p
+                            return completion!(bindingObject.borrow().get(&*Rc::new(PropertyKey::String(binding_id.clone())), bindingObject));
+                        }
+                    },
+                    _ => { unreachable!() }
+                }
+            },
+            _ => { unreachable!() }
         }
+        // FIXME: UP TO HERE WITH COMPLETION REFACTOR
     }
 
     // https://tc39.es/ecma262/#sec-object-environment-records-hasbinding-n
@@ -743,7 +687,7 @@ impl ObjectEnvironmentRecord {
         let bindingObject = &self.binding_object;
         // 2. Let foundBinding be ? HasProperty(bindingObject, N).
         // TODO: PropertyKey could also be a Symbol?
-        let found_binding = ObjectEnvironmentRecord::has_property(bindingObject, PropertyKey::String(binding_name.clone()));
+        let found_binding = completion!(ObjectEnvironmentRecord::has_property(bindingObject, PropertyKey::String(binding_name.clone())));
         // 3. If foundBinding is false, return false.
         match found_binding.value.deref() {
             ReferenceRecordOrJsValue::JSValue(js_value) => {
@@ -789,12 +733,12 @@ impl GlobalEnvironmentRecord {
                     JSValue::Boolean(bool_value) => {
                         if *bool_value {
                             //        a. Return ? DclRec.GetBindingValue(N, S).
-                            return declarative_record.borrow().get_binding_value(binding_id, is_strict);
+                            return completion!(declarative_record.borrow().get_binding_value(binding_id.clone(), is_strict));
                         } else {
                             // 3. Let ObjRec be envRec.[[ObjectRecord]].
                             let object_record = &self.object_environment_record;
                             // 4. Return ? ObjRec.GetBindingValue(N, S).
-                            return object_record.clone().unwrap().borrow().get_binding_value(binding_id, is_strict);
+                            return completion!(object_record.clone().unwrap().borrow().get_binding_value(binding_id.clone(), is_strict));
                         }
                     },
                     _ => { unreachable!() }
@@ -825,7 +769,7 @@ impl EnvironmentRecord {
                 // 3. Let ObjRec be envRec.[[ObjectRecord]].
                 let object_record = &global_environment_record.borrow().object_environment_record;
                 // 4. Return ? ObjRec.HasBinding(N).
-                return object_record.clone().unwrap().borrow().has_binding(binding_name);
+                return completion!(object_record.clone().unwrap().borrow().has_binding(binding_name.clone()));
             },
             _ => { todo!("has_binding: Support other environment record types") }
         }
@@ -878,19 +822,6 @@ struct GlobalEnvironmentRecord {
     declarative_environment_record: RefCell<DeclarativeEnvironmentRecord>
 }
 
-macro_rules! completion {
-    ($expr:expr) => {
-        match $expr.type_ {
-            CompletionRecordType::Normal => {
-                create_normal_completion($expr.value)
-            },
-            CompletionRecordType::Throw => return $expr,
-            _ => unimplemented!()
-        }
-    };
-}
-
-
 impl AstVisitor<CompletionRecord> for Interpreter {
     fn visit_expression_statement(&mut self, expression: &ExpressionStatement) -> CompletionRecord {
         return self.evaluate(expression);
@@ -912,15 +843,15 @@ impl AstVisitor<CompletionRecord> for Interpreter {
 
         match (&*left_value.value, &*right_value.value) {
             (ReferenceRecordOrJsValue::JSValue(l_value), ReferenceRecordOrJsValue::JSValue(r_value)) => {
-                let value = Interpreter::apply_string_or_numeric_binary_operator(l_value.clone(), r_value.clone(), &expression.operator.token_type);
-                return create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(value)));
+                // 5. Return ? ApplyStringOrNumericBinaryOperator(lVal, opText, rVal).
+                return completion!(Interpreter::apply_string_or_numeric_binary_operator(l_value.clone(), r_value.clone(), &expression.operator.token_type));
             }
             _ => { unreachable!() }
         }
 
     }
 
-    // https://tc39.es/ecma262/#sec-literals-runtime-semantics-evaluation
+    // https://tc39.es/ecma262/#sec-literals-`1runtime-semantics-evaluation
     fn visit_literal(&mut self, expression: &LiteralExpression) -> CompletionRecord {
         match &expression.value {
             Literal::String(value) => {
@@ -950,45 +881,49 @@ impl AstVisitor<CompletionRecord> for Interpreter {
     // https://tc39.es/ecma262/#prod-UnaryExpression
     fn visit_unary(&mut self, expression: &UnaryExpression) -> CompletionRecord {
         // 1. Let expr be ? Evaluation of UnaryExpression.
-        let right = self.evaluate(&expression.right);
+        let right = completion!(self.evaluate(&expression.right));
 
         match expression.operator.token_type {
             // httÓps://tc39.es/ecma262/#sec-unary-plus-operator-runtime-semantics-evaluation
             TokenType::PLUS => {
                 // 2. Return ? ToNumber(? GetValue(expr)).
-                match right.value.deref() {
-                    ReferenceRecordOrJsValue::JSValue(value) => {
-                        return Interpreter::to_number(value.clone());
+                match completion!(Interpreter::get_value(right.value.clone())).value.deref() {
+                    ReferenceRecordOrJsValue::JSValue(js_value) => {
+                        return completion!(Interpreter::to_number(js_value.clone()));
                     },
-                    _ => { unreachable!("TODO: We should handle passing in a JSValue from a ReferenceRecord as well") }
+                    _ => { unreachable!() }
                 }
             },
             // https://tc39.es/ecma262/#sec-unary-minus-operator-runtime-semantics-evaluation
             TokenType::MINUS => {
                 // 2. Let oldValue be ? ToNumeric(? GetValue(expr)).
-                let right_value_js = Interpreter::get_value(right.value);
-                let old_value: Rc<RefCell<JSValue>> = match right_value_js.value.deref() {
+                let right_value_js = completion!(Interpreter::get_value(right.value.clone()));
+                let old_value: CompletionRecord = match right_value_js.value.deref() {
                     ReferenceRecordOrJsValue::JSValue(value) => {
-                        Interpreter::to_numeric(value.clone())
+                        completion!(Interpreter::to_numeric(value.clone()))
                     },
                     _ => { unreachable!("TODO: We should handle passing in a JSValue from a ReferenceRecord as well") }
                 };
 
                 // 3. If oldValue is a Number, then
-                let borrowed_value = old_value.borrow();
-                match borrowed_value.deref() {
-                    JSValue::Numeric(value) => {
-                        //a. TODO: Return Number::unaryMinus(oldValue).
-                        // https://tc39.es/ecma262/#sec-numeric-types-number-unaryMinus
-                        // Currently we just return the negative value and don't check for NaN.
-                        return create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::new(RefCell::new(JSValue::Numeric(-value))))));
+                match old_value.value.deref() {
+                    ReferenceRecordOrJsValue::JSValue(js_value) => {
+                        match js_value.borrow().deref() {
+                            JSValue::Numeric(value) => {
+                                //a. TODO: Return Number::unaryMinus(oldValue).
+                                // https://tc39.es/ecma262/#sec-numeric-types-number-unaryMinus
+                                // Currently we just return the negative value and don't check for NaN.
+                                return create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::new(RefCell::new(JSValue::Numeric(-value))))));
+                            },
+                            // 4. Else
+                            _ => {
+                                // a. Assert: oldValue is a BigInt.
+                                // b. Return BigInt::unaryMinus(oldValue).
+                                todo!()
+                            }
+                        }
                     },
-                    // 4. Else
-                    _ => {
-                        // a. Assert: oldValue is a BigInt.
-                        // b. Return BigInt::unaryMinus(oldValue).
-                        todo!()
-                    }
+                    _ => { unreachable!("Expected JSValue") }
                 }
             },
             // https://tc39.es/ecma262/#sec-bitwise-not-operator-runtime-semantics-evaluation
@@ -998,11 +933,11 @@ impl AstVisitor<CompletionRecord> for Interpreter {
             // https://tc39.es/ecma262/#sec-logical-not-operator-runtime-semantics-evaluation
             TokenType::BANG => {
                 // 2. Let oldValue be ToBoolean(? GetValue(expr)).
-                let old_value: Rc<RefCell<JSValue>> = match right.value.deref() {
-                    ReferenceRecordOrJsValue::JSValue(value) => {
-                        Interpreter::to_boolean(value.clone())
+                let old_value: Rc<RefCell<JSValue>> = match completion!(Interpreter::get_value(right.value.clone())).value.deref() {
+                    ReferenceRecordOrJsValue::JSValue(js_value) => {
+                        Interpreter::to_boolean(js_value.clone())
                     },
-                    _ => { unreachable!("TODO: We should handle passing in a JSValue from a ReferenceRecord as well") }
+                    _ => { unreachable!() }
                 };
 
                 match old_value.borrow().deref() {
@@ -1036,16 +971,16 @@ impl AstVisitor<CompletionRecord> for Interpreter {
         let binding_id = expression.binding_identifier.lexeme.clone();
 
         // 2. Let lhs be ? ResolveBinding(bindingId).
-        let left_hand_side = self.resolve_binding(binding_id, None);
+        let left_hand_side =  completion!(self.resolve_binding(binding_id.clone(), None));
 
         // 3. TODO: If IsAnonymousFunctionDefinition(Initializer) is true, then
 
         // 4. Else
         // a. Let rhs be ? Evaluation of Initializer.
         let right_hand_side = match &expression.initializer {
-             Some(initializer) => self.evaluate(
+             Some(initializer) =>  completion!(self.evaluate(
                  &ExpressionStatement::AssignmentExpression(Box::new(AssignmentExpression { expression: Rc::clone(&initializer.expression), left_hand_side_expression: initializer.left_hand_side_expression.clone() }))
-             ),
+             )),
              None => {
                  // Not sure if returning undefined is correct here but if the variable has no iniliazer then just set to undefined
                  return CompletionRecord { type_: CompletionRecordType::Normal, value: Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::new(RefCell::new(JSValue::Undefined)))), target: None };
@@ -1053,12 +988,12 @@ impl AstVisitor<CompletionRecord> for Interpreter {
          };
 
         // b. Let value be ? GetValue(rhs).
-        let value = Interpreter::get_value(right_hand_side.value);
+        let value =  completion!(Interpreter::get_value(right_hand_side.value.clone()));
 
         // 5. Perform ? PutValue(lhs, value).
         match &*value.value {
             ReferenceRecordOrJsValue::JSValue(value) => {
-                self.put_value(left_hand_side.value, value.clone());
+                completion!(self.put_value(left_hand_side.value.clone(), value.clone()));
             },
             _ => { }
         }
@@ -1110,7 +1045,7 @@ impl AstVisitor<CompletionRecord> for Interpreter {
             ExpressionStatement::ObjectLiteralExpression(_) => { unimplemented!() },
             _ => {
                 // a. Let lRef be ? Evaluation of LeftHandSideExpression.
-                let left_reference = self.evaluate(&*expression.left_hand_side_expression);
+                let left_reference =  completion!(self.evaluate(&*expression.left_hand_side_expression));
                 println!("Left Hand Side Expression: {:?}\n", self.evaluate(&*expression.left_hand_side_expression));
 
                 //        b. If IsAnonymousFunctionDefinition(AssignmentExpression) is true and IsIdentifierRef of LeftHandSideExpression is true, then TODO
@@ -1118,13 +1053,13 @@ impl AstVisitor<CompletionRecord> for Interpreter {
                 //               ii. Let rVal be ? NamedEvaluation of AssignmentExpression with argument lhs.
                 //        c. Else,
                 //               i. Let rRef be ? Evaluation of AssignmentExpression.
-                let right_reference = self.evaluate(&*expression.expression);
+                let right_reference =  completion!(self.evaluate(&*expression.expression));
                 //               ii. Let rVal be ? GetValue(rRef).
-                let right_value = Interpreter::get_value(right_reference.value);
-                //        d. Perform ? PutValue(lRef, rVal).
+                let right_value =  completion!(Interpreter::get_value(right_reference.value.clone()));
                 match right_value.value.deref() {
                     ReferenceRecordOrJsValue::JSValue(value) => {
-                        self.put_value(left_reference.value, value.clone());
+                        //        d. Perform ? PutValue(lRef, rVal).
+                       //  completion!(self.put_value(left_reference.value, value.clone()));
                         //        e. Return rVal.
                         return right_value;
                     },
@@ -1192,16 +1127,20 @@ enum ObjectInternalSlot {
 
 impl Interpreter {
     pub fn new() -> Interpreter {
-        Interpreter { had_error: false,
+        Interpreter {
+            had_error: false,
             execution_contexts: vec![
                 ExecutionContext {
                     lexical_environment_record: Rc::new(RefCell::new(EnvironmentRecord::new(EnvironmentRecordType::GlobalEnvironmentRecord(Rc::new(RefCell::new(GlobalEnvironmentRecord {
                         global_this_value: None, // Should not be none, temporary
-                        object_environment_record: Option::from(Rc::new(RefCell::new(ObjectEnvironmentRecord { binding_object: Rc::new(RefCell::new(JSObject {
-                            values: HashMap::new(),
-                            prototype: None,
-                            extensible: false,
-                        })), is_with_environment: false }))), // Should not be none, temporary
+                        object_environment_record: Option::from(Rc::new(RefCell::new(ObjectEnvironmentRecord {
+                            binding_object: Rc::new(RefCell::new(JSObject {
+                                values: HashMap::new(),
+                                prototype: None,
+                                extensible: false,
+                            })),
+                            is_with_environment: false
+                        }))), // Should not be none, temporary
                         declarative_environment_record: RefCell::new(DeclarativeEnvironmentRecord { variable_bindings: HashMap::new(), function_environment_record: None })
                     })))))),
                     variable_environment_record: Rc::new(RefCell::new(EnvironmentRecord {
@@ -1237,10 +1176,10 @@ impl Interpreter {
     // https://tc39.es/ecma262/#sec-set-o-p-v-throw
     pub fn set(object: &Rc<RefCell<JSObject>>, key: Rc<PropertyKey>, value: Rc<RefCell<JSValue>>, throw: bool) -> CompletionRecord {
         // 1. Let success be ? O.[[Set]](P, V, O).
-                let success = object.borrow_mut().set(key, value, object);
-                // 2. If success is false and Throw is true, throw a TypeError exception. TODO
-                // 3. Return unused.
-                return create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::new(RefCell::new(JSValue::Undefined)))));
+        let success =  completion!(object.borrow_mut().set(key.clone(), value.clone(), object));
+        // 2. If success is false and Throw is true, throw a TypeError exception. TODO
+        // 3. Return unused.
+        return create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::new(RefCell::new(JSValue::Undefined)))));
     }
 
     fn make_basic_object(&self, mut internal_slots: Vec<ObjectInternalSlot>) -> JSObject {
@@ -1300,16 +1239,14 @@ impl Interpreter {
                         //     b. Let globalObj be GetGlobalObject().
                         let global_object = self.global_object();
 
-                        //  c. Perform ? Set(globalObj, V.[[ReferencedName]], W, false).
-                        // This is what the Set (O, P, V, Throw) Method is. FIXME: Implement Set as own method
                         // https://tc39.es/ecma262/#sec-set-o-p-v-throw
                         match &reference_record.referenced_name {
                             JSValue::String(referenced_name) => {
-                                Interpreter::set(&global_object, Rc::new(PropertyKey::String(referenced_name.clone())), value, false);
+                                //  c. Perform ? Set(globalObj, V.[[ReferencedName]], W, false).
+                                completion!(Interpreter::set(&global_object, Rc::new(PropertyKey::String(referenced_name.clone())), value.clone(), false));
                             }
                             JSValue::Symbol(symbol_value) => {
                                 todo!("Support Symbols Properly")
-                                // global_object.borrow_mut().values.insert(PropertyKey::Symbol(symbol_value), Rc::new(PropertyType::DataProperty(DataProperty { value: Rc::new(value), writable: false })));
                             },
                             _ => { unreachable!() }
                         }
@@ -1319,8 +1256,7 @@ impl Interpreter {
                     _ => {
                         // TODO: 3. If IsPropertyReference(V) is true, then
                         if Interpreter::is_property_reference(&reference_record) {
-
-                                                        todo!();
+                            todo!();
                             // 1. Let baseObj be ? ToObject(V.[[Base]]).
                             //     b. If IsPrivateReference(V) is true, then
                             //
@@ -1347,7 +1283,7 @@ impl Interpreter {
                                             match &reference_record.referenced_name {
                                                 JSValue::String(referenced_name) => {
                                                     //c. Return ? base.SetMutableBinding(V.[[ReferencedName]], W, V.[[Strict]]) (see 9.1).
-                                                    return dec_record.borrow_mut().set_mutable_binding(referenced_name.to_string(), value, false);
+                                                    return completion!(dec_record.borrow_mut().set_mutable_binding(referenced_name.to_string(), value.clone(), false));
                                                 },
                                                 _ => { unreachable!() }
                                             }
@@ -1357,8 +1293,6 @@ impl Interpreter {
                                 },
                                 _ => { unreachable!() }
                             }
-
-
                         }
                     }
                 }
@@ -1395,12 +1329,11 @@ impl Interpreter {
                                 match &reference_record.referenced_name {
                                     JSValue::String(value) => {
                                         // c. Return ? base.GetBindingValue(V.[[ReferencedName]], V.[[Strict]]) (see 9.1).
-                                        let binding_value = dec_record.borrow().get_binding_value(value.to_string(), false);
-                                        return CompletionRecord { type_: CompletionRecordType::Normal, value: binding_value.value,  target: None }
+                                        let binding_value =  completion!(dec_record.borrow().get_binding_value(value.to_string(), false));
+                                        return CompletionRecord { type_: CompletionRecordType::Normal, value: binding_value.value, target: None }
                                     },
                                     _ => { unreachable!() }
                                 }
-
                             },
                             EnvironmentRecordType::ObjectEnvironmentRecord(obj_record) => {
                                 // V.[[ReferencedName]]
@@ -1408,8 +1341,8 @@ impl Interpreter {
                                 match &reference_record.referenced_name {
                                     JSValue::String(value) => {
                                         // c. Return ? base.GetBindingValue(V.[[ReferencedName]], V.[[Strict]]) (see 9.1).
-                                        let binding_value = obj_record.borrow().get_binding_value(value.to_string(), false);
-                                        return CompletionRecord { type_: CompletionRecordType::Normal, value: binding_value.value,  target: None }
+                                        let binding_value =  completion!(obj_record.borrow().get_binding_value(value.to_string(), false));
+                                        return CompletionRecord { type_: CompletionRecordType::Normal, value: binding_value.value, target: None }
                                     },
                                     _ => { unreachable!() }
                                 }
@@ -1420,8 +1353,8 @@ impl Interpreter {
                                 match &reference_record.referenced_name {
                                     JSValue::String(value) => {
                                         // c. Return ? base.GetBindingValue(V.[[ReferencedName]], V.[[Strict]]) (see 9.1).
-                                        let binding_value = global_record.borrow().get_binding_value(value.to_string(), false);
-                                        return CompletionRecord { type_: CompletionRecordType::Normal, value: binding_value.value,  target: None }
+                                        let binding_value =  completion!(global_record.borrow().get_binding_value(value.to_string(), false));
+                                        return CompletionRecord { type_: CompletionRecordType::Normal, value: binding_value.value, target: None }
                                     },
                                     _ => { unreachable!() }
                                 }
@@ -1447,7 +1380,6 @@ impl Interpreter {
                         // }
                     },
                 }
-
             },
             _ => { unreachable!() }
         }
@@ -1464,28 +1396,28 @@ impl Interpreter {
             BaseValue::EnvironmentRecord(_) => {
                 return false;
             },
-            _=> { return true; }
+            _ => { return true; }
         }
     }
 
     // https://tc39.es/ecma262/#sec-resolvebinding
     //TODO: environment can also be 'undefined' type
     fn resolve_binding(&self, name: String, environment: Option<Rc<RefCell<EnvironmentRecord>>>) -> CompletionRecord {
-            match environment {
-                // 1. If env is not present or env is undefined, then
-                None => {
-                    // a. Set env to the running execution context's LexicalEnvironment.
-                    let env = Rc::clone(&self.running_execution_context().lexical_environment_record);
-                    // 2. Assert: env is an Environment Record.
-                    // 3. TODO: Let strict be IsStrict(the syntactic production that is being evaluated).
-                    return Interpreter::get_identifier_reference(name, &Option::from(env), false);
-                }
+        match environment {
+            // 1. If env is not present or env is undefined, then
+            None => {
+                // a. Set env to the running execution context's LexicalEnvironment.
+                let env = Rc::clone(&self.running_execution_context().lexical_environment_record);
+                // 2. Assert: env is an Environment Record.
+                // 3. TODO: Let strict be IsStrict(the syntactic production that is being evaluated).
+                // 4. Return ? GetIdentifierReference(env, name, strict).
+                return completion!(Interpreter::get_identifier_reference(name.clone(), &Option::from(env.clone()), false));
+            }
             Some(env_record) => {
                 // 3. TODO: Let strict be IsStrict(the syntactic production that is being evaluated).
                 // 4. Return ? GetIdentifierReference(env, name, strict).
-                return Interpreter::get_identifier_reference(name, &Option::from(env_record), false);
+                return  completion!(Interpreter::get_identifier_reference(name.clone(), &Option::from(env_record.clone()), false));
             },
-
         }
     }
 
@@ -1510,7 +1442,7 @@ impl Interpreter {
             }
             Some(env_record) => {
                 // 2. Let exists be ? env.HasBinding(name).
-                let exists = env_record.borrow().has_binding(name.clone());
+                let exists = completion!(env_record.borrow().has_binding(name.clone()));
 
                 // 3. If exists is true, then
                 match exists.value.deref() {
@@ -1534,16 +1466,16 @@ impl Interpreter {
                                 } else {
                                     // 4. Else
                                     // a. Let outer be env.[[OuterEnv]].
-                                    let outer =  &env_record.borrow().outer_environment_record;
+                                    let outer = &env_record.borrow().outer_environment_record;
 
                                     // b. Return ? GetIdentifierReference(outer, name, strict).
-                                    return Interpreter::get_identifier_reference(name, outer, strict);
+                                    return completion!(Interpreter::get_identifier_reference(name.clone(), outer, strict));
                                 }
                             },
-                            _=> { unreachable!() }
+                            _ => { unreachable!() }
                         }
                     },
-                    _=> { unreachable!() }
+                    _ => { unreachable!() }
                 }
             }
         }
@@ -1604,7 +1536,7 @@ impl Interpreter {
         expression_statement.accept(self)
     }
 
-    fn interpret(&mut self, statements: Vec<Statement>, execution_mode: ExecutionMode)  {
+    fn interpret(&mut self, statements: Vec<Statement>, execution_mode: ExecutionMode) {
         for statement in statements.iter() {
             let result = self.execute(statement);
             match result.type_ {
@@ -1666,41 +1598,35 @@ impl Interpreter {
                 // 10. Return ? ToNumber(primValue).
                 todo!()
             }
-
         }
     }
 
 
     // https://tc39.es/ecma262/#sec-toprimitive
-    fn to_primitive(value: Rc<RefCell<JSValue>>, preferred_type: Option<JSValue>) -> Rc<RefCell<JSValue>> {
+    fn to_primitive(value: Rc<RefCell<JSValue>>, preferred_type: Option<JSValue>) -> CompletionRecord {
         match &*value.borrow() {
             // 1. If input is an Object, then
             JSValue::Object(value) => {
                 todo!();
             },
             _ => {
-                return value.clone();
+                return create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(value.clone())));
             }
         }
     }
 
     // https://tc39.es/ecma262/#sec-tonumeric
-    fn to_numeric(value: Rc<RefCell<JSValue>>) -> Rc<RefCell<JSValue>> {
+    fn to_numeric(value: Rc<RefCell<JSValue>>) -> CompletionRecord {
         // 1. Let primValue be ? ToPrimitive(value, number).
-        let prim_value = Interpreter::to_primitive(value, None);
+        let prim_value = completion!(Interpreter::to_primitive(value.clone(), None));
 
         //2. TODO: If primValue is a BigInt, return primValue.
 
-        //3. Return ? ToNumber(primValue).
-        match Interpreter::to_number(prim_value).value.deref() {
+        // Extract the JSValue from the CompletionRecord before passing to to_number
+        match prim_value.value.deref() {
             ReferenceRecordOrJsValue::JSValue(val) => {
-                match Interpreter::to_number(val.clone()).value.deref() {
-                    ReferenceRecordOrJsValue::JSValue(val) => {
-                        return val.clone();
-                    },
-                    _ => { unreachable!("Encountered a reference record") }
-                }
-
+                //3. Return ? ToNumber(primValue).
+                return completion!(Interpreter::to_number(val.clone()));
             },
             _ => { unreachable!("Encountered a reference record") }
         }
@@ -1731,59 +1657,95 @@ impl Interpreter {
         }
     }
 
-
     // https://tc39.es/ecma262/#sec-applystringornumericbinaryoperator
-    fn apply_string_or_numeric_binary_operator(left: Rc<RefCell<JSValue>>, right: Rc<RefCell<JSValue>>, operator: &TokenType) -> Rc<RefCell<JSValue>> {
+    fn apply_string_or_numeric_binary_operator(left: Rc<RefCell<JSValue>>, right: Rc<RefCell<JSValue>>, operator: &TokenType) -> CompletionRecord {
         // 1. If opText is +, then
         if operator == &TokenType::PLUS {
             // a. Let lPrim be ? ToPrimitive(lVal).
-            let left_primitive = Interpreter::to_primitive(left, None);
+            let left_primitive = completion!(Interpreter::to_primitive(left.clone(), None));
 
             // b. Let rPrim be ? ToPrimitive(rVal).
-            let right_primitive = Interpreter::to_primitive(right, None);
+            let right_primitive = completion!(Interpreter::to_primitive(right.clone(), None));
 
-            let left_prim_ref = left_primitive.borrow();
-            let left_prim = left_prim_ref.deref();
-            match left_prim {
+            match left_primitive.value.deref() {
                 // c. If lPrim is a String or rPrim is a String, then
-                JSValue::String(ref value) => {
+                ReferenceRecordOrJsValue::JSValue(left_val) if matches!(&*left_val.borrow(), JSValue::String(_)) => {
                     // i. Let lStr be ? ToString(lPrim).
-                    let left_string = Interpreter::to_string(left_primitive.clone());
-
+                    let left_string = completion!(Interpreter::to_string(left_val.clone()));
                     // ii. Let rStr be ? ToString(rPrim).
-                    let right_string = Interpreter::to_string(right_primitive.clone());
+                    let right_string = completion!(Interpreter::to_string(match right_primitive.value.deref() {
+                        ReferenceRecordOrJsValue::JSValue(val) => val.clone(),
+                        _ => { unreachable!("Encountered a reference record") }
+                    }));
 
-                    match left_string {
-                        JSValue::String(ref left_string) => {
-                            match right_string {
-                                JSValue::String(ref right_string) => {
-                                    // iii. Return the string-concatenation of lStr and rStr.
-                                    return Rc::new(RefCell::new(JSValue::String(format!("{}{}", left_string, right_string))));
+                    match left_string.value.deref() {
+                        ReferenceRecordOrJsValue::JSValue(left_string_val) if matches!(&*left_string_val.borrow(), JSValue::String(_)) => {
+                            // Extract the string values from the completion records
+                            let left_str = match left_string.value.deref() {
+                                ReferenceRecordOrJsValue::JSValue(val) => {
+                                    if let JSValue::String(s) = &*val.borrow() {
+                                        s.clone()
+                                    } else {
+                                        panic!("Expected string value")
+                                    }
                                 },
-                                _ => { panic!("Unexpected right JS value: {:?}", right_string) }
-                            }
-                        },
+                                _ => panic!("Expected JSValue")
+                            };
+
+                            let right_str = match right_string.value.deref() {
+                                ReferenceRecordOrJsValue::JSValue(val) => {
+                                    if let JSValue::String(s) = &*val.borrow() {
+                                        s.clone()
+                                    } else {
+                                        panic!("Expected string value")
+                                    }
+                                },
+                                _ => panic!("Expected JSValue")
+                            };
+
+                            // iii. Return the string-concatenation of lStr and rStr.
+                            return create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::new(RefCell::new(JSValue::String(format!("{}{}", left_str, right_str)))))));
+                        }
                         _ => { panic!("Unexpected left JS value: {:?}", right_string) }
                     }
                 },
                 _ => {
-                    match right_primitive.borrow().deref() {
+                    match right_primitive.value.deref() {
                         // c. If lPrim is a String or rPrim is a String, then
-                        JSValue::String(ref value) => {
-                            let left_string = Interpreter::to_string(left_primitive.clone());
-                            let right_string = Interpreter::to_string(right_primitive.clone());
+                        // c. If lPrim is a String or rPrim is a String, then
+                        ReferenceRecordOrJsValue::JSValue(right_val) if matches!(&*right_val.borrow(), JSValue::String(_)) => {
+                            // i. Let lStr be ? ToString(lPrim).
+                            let left_string = completion!(Interpreter::to_string(right_val.clone()));
+                            // ii. Let rStr be ? ToString(rPrim).
+                            let right_string = completion!(Interpreter::to_string(match right_primitive.value.deref() {
+                                 ReferenceRecordOrJsValue::JSValue(val) => val.clone(),
+                                    _ => { unreachable!("Encountered a reference record") }
+                            }));
 
-                            match left_string {
-                                JSValue::String(ref left_string) => {
-                                    match right_string {
-                                        JSValue::String(ref right_string) => {
-                                            return Rc::new(RefCell::new(JSValue::String(format!("{}{}", left_string, right_string))));
-                                        },
-                                        _ => { panic!("Unexpected right JS value: {:?}", right_string) }
+                            // Extract the string values and return the concatenation result
+                            let left_str = match right_string.value.deref() {
+                                ReferenceRecordOrJsValue::JSValue(val) => {
+                                    if let JSValue::String(s) = &*val.borrow() {
+                                        s.clone()
+                                    } else {
+                                        panic!("Expected string value")
                                     }
                                 },
-                                _ => { panic!("Unexpected left JS value: {:?}", right_string) }
-                            }
+                                _ => panic!("Expected JSValue")
+                            };
+
+                            let right_str = match right_string.value.deref() {
+                                ReferenceRecordOrJsValue::JSValue(val) => {
+                                    if let JSValue::String(s) = &*val.borrow() {
+                                        s.clone()
+                                    } else {
+                                        panic!("Expected string value")
+                                    }
+                                },
+                                _ => panic!("Expected JSValue")
+                            };
+
+                            return create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::new(RefCell::new(JSValue::String(format!("{}{}", left_str, right_str)))))));
                         },
                         _ => {
                             // We know the opText is still '+' so apply the addition operation.
@@ -1793,38 +1755,57 @@ impl Interpreter {
                             // 2. NOTE: At this point, it must be a numeric operation.
 
                             //3. Let lNum be ? ToNumeric(lVal).
-                            let left_numeric = Interpreter::to_numeric(left_primitive.clone());
+                            let left_numeric = completion!(Interpreter::to_numeric(match left_primitive.value.deref() {
+                                ReferenceRecordOrJsValue::JSValue(val) => val.clone(),
+                                _ => panic!("Expected JSValue")
+                            }));
 
                             //4. Let rNum be ? ToNumeric(rVal).
-                            let right_numeric = Interpreter::to_numeric(right_primitive.clone());
+                            let right_numeric = completion!(Interpreter::to_numeric(match right_primitive.value.deref() {
+                                ReferenceRecordOrJsValue::JSValue(val) => val.clone(),
+                                _ => panic!("Expected JSValue")
+                            }));
 
                             // 5. If SameType(lNum, rNum) is false, throw a TypeError exception.
-                            if !Interpreter::same_type(&left_numeric.borrow(), &right_numeric.borrow()) {
+                            let left_val = match left_numeric.value.deref() {
+                                ReferenceRecordOrJsValue::JSValue(val) => val.borrow(),
+                                _ => panic!("Expected JSValue")
+                            };
+                            let right_val = match right_numeric.value.deref() {
+                                ReferenceRecordOrJsValue::JSValue(val) => val.borrow(),
+                                _ => panic!("Expected JSValue")
+                            };
+
+                            if !Interpreter::same_type(&*left_val, &*right_val) {
                                 todo!("Throw TypeError exception");
                             }
 
                             // TODO: 6. If lNum is a BigInt, then
 
                             //7. Else,
-                            let left_num_ref = left_numeric.borrow();
-                            let right_num_ref = right_numeric.borrow();
+                            let left_num_ref = left_numeric.value.clone();
+                            let right_num_ref = right_numeric.value.clone();
                             let left_num = left_num_ref.deref();
                             let right_num = right_num_ref.deref();
                             match (left_num, right_num) {
-                                (JSValue::Numeric(left_value), JSValue::Numeric(right_value)) => {
-                                    return Rc::new(RefCell::new(JSValue::Numeric(left_value + right_value)));
+                                (ReferenceRecordOrJsValue::JSValue(left_val), ReferenceRecordOrJsValue::JSValue(right_val)) => {
+                                    if let (JSValue::Numeric(left_value), JSValue::Numeric(right_value)) = (&*left_val.borrow(), &*right_val.borrow()) {
+                                        return create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::new(RefCell::new(JSValue::Numeric(*left_value + *right_value))))));
+                                    } else {
+                                        panic!("Expected numeric JS values")
+                                    }
                                 },
                                 _ => { panic!("Unexpected right JS value") }
                             }
                         }
                     }
-                }
+                },
             }
         } else {
             // d. Set lVal to lPrim.
             // e. Set rVal to rPrim.
-            let left_primitive = Interpreter::to_primitive(left, None);
-            let right_primitive = Interpreter::to_primitive(right, None);
+            let left_primitive = completion!(Interpreter::to_primitive(left.clone(), None));
+            let right_primitive = completion!(Interpreter::to_primitive(right.clone(), None));
 
             match operator {
                 // https://tc39.es/ecma262/#sec-numeric-types-number-multiply
@@ -1833,27 +1814,47 @@ impl Interpreter {
                     // 2. NOTE: At this point, it must be a numeric operation.
 
                     //3. Let lNum be ? ToNumeric(lVal).
-                    let left_numeric = Interpreter::to_numeric(left_primitive);
+                    let left_numeric = completion!(Interpreter::to_numeric(match left_primitive.value.deref() {
+                        ReferenceRecordOrJsValue::JSValue(val) => val.clone(),
+                        _ => panic!("Expected JSValue")
+                    }));
 
                     //4. Let rNum be ? ToNumeric(rVal).
-                    let right_numeric = Interpreter::to_numeric(right_primitive);
+                    let right_numeric = completion!(Interpreter::to_numeric(match right_primitive.value.deref() {
+                        ReferenceRecordOrJsValue::JSValue(val) => val.clone(),
+                        _ => panic!("Expected JSValue")
+                    }));
 
                     // 5. If SameType(lNum, rNum) is false, throw a TypeError exception.
-                    if !Interpreter::same_type(&left_numeric.borrow(), &right_numeric.borrow()) {
+                    // Store the borrowed values in local variables to extend their lifetime
+                    let left_val = match left_numeric.value.deref() {
+                        ReferenceRecordOrJsValue::JSValue(val) => val.borrow(),
+                        _ => panic!("Expected JSValue")
+                    };
+                    let right_val = match right_numeric.value.deref() {
+                        ReferenceRecordOrJsValue::JSValue(val) => val.borrow(),
+                        _ => panic!("Expected JSValue")
+                    };
+
+                    if !Interpreter::same_type(&*left_val, &*right_val) {
                         todo!("Throw TypeError exception");
                     }
 
                     // TODO: 6. If lNum is a BigInt, then
 
                     //7. Else,
-                    let left_borrowed = left_numeric.borrow();
-                    let right_borrowed = right_numeric.borrow();
-                    let left_ref = left_borrowed.deref();
-                    let right_ref = right_borrowed.deref();
+                    let left_num_ref = left_numeric.value.clone();
+                    let right_num_ref = right_numeric.value.clone();
+                    let left_ref = left_num_ref.deref();
+                    let right_ref = right_num_ref.deref();
 
                     match (left_ref, right_ref) {
-                        (JSValue::Numeric(left_value), JSValue::Numeric(right_value)) => {
-                            return Rc::new(RefCell::new(JSValue::Numeric(left_value * right_value)));
+                        (ReferenceRecordOrJsValue::JSValue(left_val), ReferenceRecordOrJsValue::JSValue(right_val)) => {
+                            if let (JSValue::Numeric(left_value), JSValue::Numeric(right_value)) = (&*left_val.borrow(), &*right_val.borrow()) {
+                                return create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::new(RefCell::new(JSValue::Numeric(left_value * right_value))))));
+                            } else {
+                                panic!("Expected numeric JS values")
+                            }
                         },
                         _ => { panic!("Unexpected right JS value") }
                     }
@@ -1864,27 +1865,46 @@ impl Interpreter {
                     // 2. NOTE: At this point, it must be a numeric operation.
 
                     //3. Let lNum be ? ToNumeric(lVal).
-                    let left_numeric = Interpreter::to_numeric(left_primitive);
+                    let left_numeric = completion!(Interpreter::to_numeric(match left_primitive.value.deref() {
+                        ReferenceRecordOrJsValue::JSValue(val) => val.clone(),
+                        _ => panic!("Expected JSValue")
+                    }));
 
                     //4. Let rNum be ? ToNumeric(rVal).
-                    let right_numeric = Interpreter::to_numeric(right_primitive);
+                    let right_numeric = completion!(Interpreter::to_numeric(match right_primitive.value.deref() {
+                        ReferenceRecordOrJsValue::JSValue(val) => val.clone(),
+                        _ => panic!("Expected JSValue")
+                    }));
 
                     // 5. If SameType(lNum, rNum) is false, throw a TypeError exception.
-                    if !Interpreter::same_type(&left_numeric.borrow(), &right_numeric.borrow()) {
+                    let left_val = match left_numeric.value.deref() {
+                        ReferenceRecordOrJsValue::JSValue(val) => val.borrow(),
+                        _ => panic!("Expected JSValue")
+                    };
+                    let right_val = match right_numeric.value.deref() {
+                        ReferenceRecordOrJsValue::JSValue(val) => val.borrow(),
+                        _ => panic!("Expected JSValue")
+                    };
+
+                    if !Interpreter::same_type(&*left_val, &*right_val) {
                         todo!("Throw TypeError exception");
                     }
 
                     // TODO: 6. If lNum is a BigInt, then
 
                     //7. Else,
-                    let left_borrowed = left_numeric.borrow();
-                    let right_borrowed = right_numeric.borrow();
-                    let left_ref = left_borrowed.deref();
-                    let right_ref = right_borrowed.deref();
+                    let left_num_ref = left_numeric.value.clone();
+                    let right_num_ref = right_numeric.value.clone();
+                    let left_ref = left_num_ref.deref();
+                    let right_ref = right_num_ref.deref();
 
                     match (left_ref, right_ref) {
-                        (JSValue::Numeric(left_value), JSValue::Numeric(right_value)) => {
-                            return Rc::new(RefCell::new(JSValue::Numeric(left_value / right_value)));
+                        (ReferenceRecordOrJsValue::JSValue(left_val), ReferenceRecordOrJsValue::JSValue(right_val)) => {
+                            if let (JSValue::Numeric(left_value), JSValue::Numeric(right_value)) = (&*left_val.borrow(), &*right_val.borrow()) {
+                                return create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::new(RefCell::new(JSValue::Numeric(left_value / right_value))))));
+                            } else {
+                                panic!("Expected numeric JS values")
+                            }
                         },
                         _ => { panic!("Unexpected right JS value") }
                     }
@@ -1895,46 +1915,68 @@ impl Interpreter {
                     // 2. NOTE: At this point, it must be a numeric operation.
 
                     //3. Let lNum be ? ToNumeric(lVal).
-                    let left_numeric = Interpreter::to_numeric(left_primitive);
+                    let left_numeric = completion!(Interpreter::to_numeric(match left_primitive.value.deref() {
+                        ReferenceRecordOrJsValue::JSValue(val) => val.clone(),
+                        _ => panic!("Expected JSValue")
+                    }));
 
                     //4. Let rNum be ? ToNumeric(rVal).
-                    let right_numeric = Interpreter::to_numeric(right_primitive);
+                    let right_numeric = completion!(Interpreter::to_numeric(match right_primitive.value.deref() {
+                        ReferenceRecordOrJsValue::JSValue(val) => val.clone(),
+                        _ => panic!("Expected JSValue")
+                    }));
 
                     // 5. If SameType(lNum, rNum) is false, throw a TypeError exception.
-                    if !Interpreter::same_type(&left_numeric.borrow(), &right_numeric.borrow()) {
+                    // Store the borrowed values in local variables to extend their lifetime
+                    let left_val = match left_numeric.value.deref() {
+                        ReferenceRecordOrJsValue::JSValue(val) => val.borrow(),
+                        _ => panic!("Expected JSValue")
+                    };
+                    let right_val = match right_numeric.value.deref() {
+                        ReferenceRecordOrJsValue::JSValue(val) => val.borrow(),
+                        _ => panic!("Expected JSValue")
+                    };
+
+                    if !Interpreter::same_type(&*left_val, &*right_val) {
                         todo!("Throw TypeError exception");
                     }
 
                     // TODO: 6. If lNum is a BigInt, then
 
                     //7. Else,
-                    let left_borrowed = left_numeric.borrow();
-                    let right_borrowed = right_numeric.borrow();
-                    let left_ref = left_borrowed.deref();
-                    let right_ref = right_borrowed.deref();
+                    let left_num_ref = left_numeric.value.clone();
+                    let right_num_ref = right_numeric.value.clone();
+                    let left_ref = left_num_ref.deref();
+                    let right_ref = right_num_ref.deref();
 
                     match (left_ref, right_ref) {
-                        (JSValue::Numeric(left_value), JSValue::Numeric(right_value)) => {
-                            return Rc::new(RefCell::new(JSValue::Numeric(left_value - right_value)));
+                        (ReferenceRecordOrJsValue::JSValue(left_val), ReferenceRecordOrJsValue::JSValue(right_val)) => {
+                            if let (JSValue::Numeric(left_value), JSValue::Numeric(right_value)) = (&*left_val.borrow(), &*right_val.borrow()) {
+                                return create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::new(RefCell::new(JSValue::Numeric(left_value - right_value))))));
+                            } else {
+                                panic!("Expected numeric JS values")
+                            }
                         },
-                        _ => { panic!("Unexpected right JSValue") }
+                        _ => { panic!("Unexpected right JS value") }
                     }
                 },
                 _ => { panic!("Unexpected operator: {:?}", operator) }
             }
         }
+    }
 
-
-
-
+    // https://tc39.es/ecma262/#sec-numeric-types-number-tostring
+    // TODO: Implement this to spec, for now we'll just use Rust's default implementation of to_string on numbers
+    fn number_to_string(value: Number) -> String {
+        return value.to_string();
     }
 
     // https://tc39.es/ecma262/#sec-tostring
-    fn to_string(value: Rc<RefCell<JSValue>>) -> JSValue {
+    pub fn to_string(value: Rc<RefCell<JSValue>>) -> CompletionRecord {
         match value.borrow().deref() {
             // 1. If argument is a String, return argument.
             JSValue::String(value) => {
-                return JSValue::String(value.clone());
+                create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::new(RefCell::new(JSValue::String(value.clone()))))))
             },
             // 2. If argument is a Symbol, throw a TypeError exception.
             JSValue::Symbol(value) => {
@@ -1942,23 +1984,23 @@ impl Interpreter {
             },
             // 3. If argument is undefined, return "undefined".
             JSValue::Undefined => {
-                return JSValue::String("undefined".to_string());
+                create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::new(RefCell::new(JSValue::String("undefined".to_string()))))))
             }
             // 4. If argument is null, return "null".
             JSValue::Null => {
-                return JSValue::String("null".to_string());
+                create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::new(RefCell::new(JSValue::String("null".to_string()))))))
             },
             // 5. If argument is true, return "true".
             JSValue::Boolean(true) => {
-                return JSValue::String("true".to_string());
+                create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::new(RefCell::new(JSValue::String("true".to_string()))))))
             },
             // 6. If argument is false, return "false".
             JSValue::Boolean(false) => {
-                return JSValue::String("false".to_string());
+                create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::new(RefCell::new(JSValue::String("false".to_string()))))))
             },
             // 7. If argument is a Number, return Number::toString(argument, 10).
             JSValue::Numeric(value) => {
-                return JSValue::String(Interpreter::number_to_string(value.clone()));
+                create_normal_completion(Rc::new(ReferenceRecordOrJsValue::JSValue(Rc::new(RefCell::new(JSValue::String(Interpreter::number_to_string(value.clone())))))))
             },
             // 8. TODO: If argument is a BigInt, return BigInt::toString(argument, 10).
 
@@ -1972,15 +2014,9 @@ impl Interpreter {
         }
     }
 
-    // https://tc39.es/ecma262/#sec-numeric-types-number-tostring
-    // TODO: Implement this to spec, for now we'll just use Rust's default implementation of to_string on numbers
-    fn number_to_string(value: Number) -> String {
-        return value.to_string();
-    }
 
     // https://tc39.es/ecma262/#sec-sametype
     fn same_type(left: &JSValue, right: &JSValue) -> bool {
-
         match (left, right) {
             // 1. If x is undefined and y is undefined, return true.
             (JSValue::Undefined, JSValue::Undefined) => {
@@ -2018,7 +2054,6 @@ impl Interpreter {
             }
         }
     }
-
 }
 
 enum ExecutionMode {
